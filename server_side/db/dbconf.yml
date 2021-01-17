@@ -1,0 +1,3 @@
+development:
+  driver: mymysql
+  open: tcp:db:3306*jwtsample/root/root
