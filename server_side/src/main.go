@@ -1,21 +1,21 @@
 package main
 
 import (
-	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
 	"time"
 
-	"github.com/form3tech-oss/jwt-go"
-	"github.com/labstack/echo"
-	"github.com/labstack/echo/middleware"
+	"github.com/golang-jwt/jwt"
+	"github.com/labstack/echo/v4"
+	"github.com/labstack/echo/v4/middleware"
 	"gorm.io/driver/mysql"
 	"gorm.io/gorm"
 )
 
 // --------
-// infrastructure↓
+// DB
 // --------
 
 var db *gorm.DB
@@ -31,6 +31,21 @@ func InitDB() *gorm.DB {
 }
 
 // --------
+// middleware↓
+// --------
+
+func InitMiddleware(e *echo.Echo) {
+	e.Use(middleware.Logger())
+	e.Use(middleware.Recover())
+	e.Use(middleware.CORSWithConfig(middleware.CORSConfig{
+		AllowOrigins:     []string{"*"},
+		AllowMethods:     []string{http.MethodGet, http.MethodHead, http.MethodPut, http.MethodPatch, http.MethodPost, http.MethodDelete},
+		AllowHeaders:     []string{echo.HeaderAccessControlAllowHeaders, echo.HeaderOrigin, echo.HeaderContentType, echo.HeaderAccept, echo.HeaderAuthorization},
+		AllowCredentials: true,
+	}))
+}
+
+// --------
 // router↓
 // --------
 
@@ -38,18 +53,20 @@ func InitDB() *gorm.DB {
 func InitRouting(e *echo.Echo) {
 	// 認証が不要なルーティング
 	e.POST("/public", Public)
-	e.POST("/signup", Signup)
+	e.POST("/login", Login)
 
 	// 認証が必要なルーティングのグループ化
-	api := e.Group("/api")
-	api.Use(middleware.JWTWithConfig(Config))
+	auth := e.Group("/auth")
+
+	// JWTの設定
+	auth.Use(middleware.JWTWithConfig(Config))
 
 	// // 認証が必要なルーティング
-	api.POST("/private", Private)
+	auth.GET("/private", Private)
 }
 
 // --------
-// Config↓
+// JWTConfig
 // --------
 
 var signingKey = []byte(os.Getenv("SIGNINGKEY"))
@@ -57,132 +74,70 @@ var signingKey = []byte(os.Getenv("SIGNINGKEY"))
 // Config ...
 var Config = middleware.JWTConfig{
 	SigningKey: signingKey,
-}
-
-// --------
-// handler↓
-// --------
-
-type SignupResponse struct {
-	UserID int    `json:"user_id"`
-	Token  string `json:"token"`
-}
-
-// Signup ...
-func Signup(c echo.Context) error {
-	user := User{}
-
-	if err := c.Bind(&user); err != nil {
-		return err
-	}
-
-	if user.Name == "" || user.Password == "" {
-		return c.JSON(http.StatusCreated, &echo.HTTPError{
-			Code:    http.StatusBadRequest,
-			Message: "invalid name or password",
-		})
-	}
-
-	u, err := FindUser(&user)
-	if err != nil {
-		c.JSON(http.StatusCreated, err)
-	}
-	if u != nil && u.ID != 0 {
-		return c.JSON(http.StatusCreated, &echo.HTTPError{
-			Code:    http.StatusConflict,
-			Message: "Already exists",
-		})
-	}
-	err = CreateUser(&user)
-	if err != nil {
-		return c.JSON(http.StatusCreated, err)
-	}
-
-	// ユーザー用トークン生成
-	token := makeToken(user)
-
-	return c.JSON(http.StatusCreated, SignupResponse{UserID: user.ID, Token: token})
-}
-
-// makeToken トークン生成
-func makeToken(user User) string {
-	// headerのセット
-	token := jwt.New(jwt.SigningMethodHS256)
-
-	// claimsのセット
-	claims := token.Claims.(jwt.MapClaims)
-	claims["admin"] = true
-	claims["sub"] = user.ID
-	claims["name"] = user.Name
-	claims["iat"] = time.Now()
-	claims["exp"] = time.Now().Add(time.Hour * 24).Unix()
-
-	// 電子署名
-	tokenString, _ := token.SignedString([]byte(os.Getenv("SIGNINGKEY")))
-
-	return tokenString
-}
-
-// Public ...
-func Public(c echo.Context) error {
-	product := Product{}
-
-	if err := c.Bind(&product); err != nil {
-		return err
-	}
-	return c.JSON(http.StatusCreated, map[string]string{"This is Public Function": product.Name})
-}
-
-// Private ...
-func Private(c echo.Context) error {
-	product := Product{}
-
-	if err := c.Bind(&product); err != nil {
-		return err
-	}
-	return c.JSON(http.StatusCreated, map[string]string{"This is Private Function": product.Name})
+	Claims:     &jwtCustomClaims{}, // デフォルトは「jwt.MapClaims{}」だが、カスタムのstructを指定することも可能
 }
 
 // --------
 // model↓
 // --------
 
-// User ...
-type User struct {
-	ID       int    `json:"id"`
-	Name     string `json:"name"`
+// LoginInfo ...
+type LoginInfo struct {
+	UID      string `json:"uid"`
 	Password string `json:"password"`
 }
 
-// Product ...
-type Product struct {
-	Name string `json:"name"`
+type jwtCustomClaims struct {
+	Name  string `json:"name"`
+	Admin bool   `json:"admin"`
+	jwt.StandardClaims
 }
 
 // --------
-// data access↓
+// handler↓
 // --------
 
-// CreateUser ...
-func CreateUser(u *User) error {
-	err := db.Create(&u).Error
-	if err != nil {
+// Login ...
+func Login(c echo.Context) error {
+	loginInfo := &LoginInfo{}
+
+	if err := c.Bind(loginInfo); err != nil {
 		return err
 	}
-	return nil
+
+	// Set custom claims
+	claims := &jwtCustomClaims{
+		Name:  "Jon Snow",
+		Admin: true,
+		StandardClaims: jwt.StandardClaims{
+			ExpiresAt: time.Now().Add(time.Hour * 72).Unix(),
+		},
+	}
+
+	// Create token with claims
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+
+	// Generate encoded token and send it as response.
+	t, err := token.SignedString([]byte(os.Getenv("SIGNINGKEY")))
+	if err != nil {
+		fmt.Printf("SIGNINGKEY:%v\n", os.Getenv("SIGNINGKEY"))
+		return err
+	}
+
+	return c.JSON(http.StatusOK, t)
 }
 
-// FindUser ...
-func FindUser(u *User) (*User, error) {
-	user := &User{}
-	err := db.Where("name = ? AND password = ?", u.Name, u.Password).First(user).Error
-	if err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, nil
-		}
-		return nil, err
-	}
-	return user, nil
+// Public ...
+func Public(c echo.Context) error {
+	return c.JSON(http.StatusCreated, "This is Public Function")
+}
+
+// Private ...
+func Private(c echo.Context) error {
+	user := c.Get("user").(*jwt.Token)       // JWTConfigに設定されたデフォルトのContextKey「user」を指定してToken取得
+	claims := user.Claims.(*jwtCustomClaims) // Tokenからclaims取得
+	name := claims.Name                      // claimsの設定内容取得
+	return c.JSON(http.StatusOK, "Welcome "+name+"!")
 }
 
 func main() {
@@ -196,13 +151,7 @@ func main() {
 
 	e := echo.New()
 
-	// CORS設定
-	e.Use(middleware.CORSWithConfig(middleware.CORSConfig{
-		AllowOrigins:     []string{"*"},
-		AllowMethods:     []string{http.MethodGet, http.MethodHead, http.MethodPut, http.MethodPatch, http.MethodPost, http.MethodDelete},
-		AllowHeaders:     []string{echo.HeaderOrigin, echo.HeaderContentType, echo.HeaderAccept, echo.HeaderAuthorization},
-		AllowCredentials: true,
-	}))
+	InitMiddleware(e)
 
 	InitRouting(e)
 

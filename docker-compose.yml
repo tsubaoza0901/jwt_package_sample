@@ -34,6 +34,8 @@ services:
       - '9010:9010'
     tty: true
     stdin_open: true
+    environment:
+      SIGNINGKEY: ${SIGNINGKEY}
     depends_on:
       - db
     networks:

@@ -39,6 +39,14 @@ POST http://127.0.0.1:9010/api/private
 
 ※signup で取得したトークンを header に設定していないとアクセスできない。
 
+## その他
+
+使用時は「.env」ファイルを作成し、以下の環境変数を設定する必要あり
+
+```
+SIGNINGKEY=任意の文字列
+```
+
 # 参考 URL
 
 Godoc | package jwt  
